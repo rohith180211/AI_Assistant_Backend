@@ -32,6 +32,8 @@ def read_root():
 
 
 def process_document(doc_id, file_path):
+    db = SessionLocal()
+
     text = extract_text_from_pdf(file_path)
     chunks = chunk_text(text)
     embeddings = get_embeddings(chunks)
@@ -44,8 +46,10 @@ def process_document(doc_id, file_path):
             metadatas=[{"doc_id": doc_id}]
         )
 
-    documents[doc_id]["status"] = "completed"
-    documents[doc_id]["num_chunks"] = len(chunks)
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    doc.status = "completed"
+
+    db.commit()
 
 
 @app.post("/upload")
