@@ -7,6 +7,10 @@ from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 from fastapi import BackgroundTasks
 from pydantic import BaseModel
+from database import engine, Base, SessionLocal
+from models import Document
+
+Base.metadata.create_all(bind=engine)
 
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -46,6 +50,7 @@ def process_document(doc_id, file_path):
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
+    db = SessionLocal()
     doc_id = str(uuid.uuid4())
     file_path = os.path.join(UPLOAD_DIR, file.filename)
 
@@ -53,13 +58,17 @@ async def upload_file(file: UploadFile = File(...), background_tasks: Background
         content = await file.read()
         f.write(content)
 
-    documents[doc_id] = {
-        "filename": file.filename,
-        "path": file_path,
-        "status": "processing"
-    }
+    doc = Document(
+        id=doc_id,
+        filename=file.filename,
+        path=file_path,
+        status="processing"
+    )
 
-    # 🔥 Run in background
+    db.add(doc)
+    db.commit()
+
+    # Run in background
     background_tasks.add_task(process_document, doc_id, file_path)
 
     return {
