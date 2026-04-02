@@ -103,6 +103,13 @@ def list_documents():
     finally:
         db.close()
 
+def is_summary_query(question: str):
+    q = question.lower()
+    return any(word in q for word in [
+        "summarize", "summary", "overview", "explain the document",
+        "what is this document about"
+    ])
+
 def extract_text_from_pdf(file_path):
     reader = PdfReader(file_path)
     text = ""
@@ -130,12 +137,13 @@ def get_embeddings(chunks):
 
 class QueryRequest(BaseModel):
     question: str
+    doc_id: str | None = None
 
 @app.post("/query")
-def query_documents(request: QueryRequest,k: int = 3):
+def query_documents(request: QueryRequest, k: int = 3):
     cache_key = request.question.lower().strip()
-    cached_response = cache.get(cache_key)
 
+    cached_response = cache.get(cache_key)
     if cached_response:
         return {
             "question": request.question,
@@ -143,26 +151,76 @@ def query_documents(request: QueryRequest,k: int = 3):
             "source": "cache"
         }
 
+    if is_summary_query(request.question):
+        if not request.doc_id:
+            return {
+            "answer": "Please specify a document to summarize."
+            }
+
+        results = collection.get(
+        where={"doc_id": request.doc_id},
+        include=["documents"]
+        )   
+
+        all_chunks = results.get("documents", [])
+
+        print("TOTAL CHUNKS:", len(all_chunks))
+
+        all_chunks = results.get("documents", [])
+
+        print("TOTAL CHUNKS:", len(all_chunks))
+
+        if not all_chunks:
+            return {
+                "question": request.question,
+                "answer": "No documents available to summarize.",
+                "mode": "summary"
+            }
+
+        # limit chunks to avoid token overflow
+        selected_chunks = all_chunks[:20]
+
+        answer = generate_answer(request.question, selected_chunks)
+
+        return {
+            "question": request.question,
+            "answer": answer,
+            "mode": "summary"
+        }
+
+    # 🔥 NORMAL RAG MODE
     query_embedding = model.encode([request.question])[0]
 
     results = collection.query(
         query_embeddings=[query_embedding.tolist()],
         n_results=k
     )
+
     chunks = results["documents"][0]
-    if not chunks:
+
+    # 🔥 FALLBACK (general chat)
+    if not chunks or all(len(chunk.strip()) < 20 for chunk in chunks):
+        response = ollama.chat(
+            model='llama3',
+            messages=[{"role": "user", "content": request.question}]
+        )
+
         return {
-        "question": request.question,
-        "answer": "No relevant information found.",
-        "sources": []
+            "question": request.question,
+            "answer": response['message']['content'],
+            "mode": "general"
         }
+
     clean_sources = list(dict.fromkeys(chunks))
+
     answer = generate_answer(request.question, clean_sources)
+
     cache.set(cache_key, answer, ex=3600)
 
     return {
         "question": request.question,
         "answer": answer,
+        "mode": "rag",
         "sources": clean_sources
     }
 
