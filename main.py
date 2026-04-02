@@ -23,8 +23,6 @@ app = FastAPI()
 
 UPLOAD_DIR = "uploads"
 
-# In-memory database
-documents = {}
 
 @app.get("/")
 def read_root():
@@ -83,7 +81,21 @@ async def upload_file(file: UploadFile = File(...), background_tasks: Background
 
 @app.get("/documents")
 def list_documents():
-    return documents
+    db = SessionLocal()
+    try:
+        docs = db.query(Document).all()
+
+        return [
+            {
+                "id": doc.id,
+                "filename": doc.filename,
+                "path": doc.path,
+                "status": doc.status
+            }
+            for doc in docs
+        ]
+    finally:
+        db.close()
 
 def extract_text_from_pdf(file_path):
     reader = PdfReader(file_path)
