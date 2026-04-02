@@ -9,6 +9,9 @@ from fastapi import BackgroundTasks
 from pydantic import BaseModel
 from database import engine, Base, SessionLocal
 from models import Document
+import redis
+
+cache = redis.Redis(host='localhost', port=6379, db=0)
 
 Base.metadata.create_all(bind=engine)
 
@@ -31,30 +34,33 @@ def read_root():
 
 def process_document(doc_id, file_path):
     db = SessionLocal()
+    try:
+        text = extract_text_from_pdf(file_path)
+        chunks = chunk_text(text)
+        embeddings = get_embeddings(chunks)
 
-    text = extract_text_from_pdf(file_path)
-    chunks = chunk_text(text)
-    embeddings = get_embeddings(chunks)
+        for i, chunk in enumerate(chunks):
+            collection.add(
+                documents=[chunk],
+                embeddings=[embeddings[i].tolist()],
+                ids=[f"{doc_id}_{i}"],
+                metadatas=[{"doc_id": doc_id}]
+            )
 
-    for i, chunk in enumerate(chunks):
-        collection.add(
-            documents=[chunk],
-            embeddings=[embeddings[i].tolist()],
-            ids=[f"{doc_id}_{i}"],
-            metadatas=[{"doc_id": doc_id}]
-        )
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        doc.status = "completed"
 
-    doc = db.query(Document).filter(Document.id == doc_id).first()
-    doc.status = "completed"
+        db.commit()
+    finally:        db.close()
 
-    db.commit()
+
 
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     db = SessionLocal()
     doc_id = str(uuid.uuid4())
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
+    file_path = os.path.join(UPLOAD_DIR, f"{doc_id}_{file.filename}")
 
     with open(file_path, "wb") as f:
         content = await file.read()
@@ -127,6 +133,16 @@ class QueryRequest(BaseModel):
 
 @app.post("/query")
 def query_documents(request: QueryRequest,k: int = 3):
+    cache_key = request.question.lower().strip()
+    cached_response = cache.get(cache_key)
+
+    if cached_response:
+        return {
+            "question": request.question,
+            "answer": cached_response.decode(),
+            "source": "cache"
+        }
+
     query_embedding = model.encode([request.question])[0]
 
     results = collection.query(
@@ -134,8 +150,16 @@ def query_documents(request: QueryRequest,k: int = 3):
         n_results=k
     )
     chunks = results["documents"][0]
+    if not chunks:
+        return {
+        "question": request.question,
+        "answer": "No relevant information found.",
+        "sources": []
+        }
     clean_sources = list(dict.fromkeys(chunks))
     answer = generate_answer(request.question, clean_sources)
+    cache.set(cache_key, answer, ex=3600)
+
     return {
         "question": request.question,
         "answer": answer,
